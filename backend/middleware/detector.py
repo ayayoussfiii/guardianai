@@ -16,7 +16,7 @@ class DetectionResult:
     details     : str
 
 
-# ── Mots-clés suspects par catégorie ─────────────────────────────────────────
+
 
 SUSPICIOUS_KEYWORDS = {
     ThreatType.JAILBREAK: [
