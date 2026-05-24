@@ -29,7 +29,7 @@ app.add_middleware(
     allow_headers  = ["*"],
 )
 
-# ── 
+# ── instance des composants
 
 scanner  = PromptScanner()
 detector = IntentDetector(use_ml=False)   # passer True pour activer le ML
