@@ -16,7 +16,7 @@ class FilterResult:
     details       : str
 
 
-# ── Patterns dangereux dans les réponses ─────────────────────────────────────
+# ── Patterns dangers 
 
 DANGEROUS_OUTPUT_PATTERNS = [
     (r"(?i)here('s| is) how to (make|build|create) (a )?(bomb|weapon|malware|virus)", "instruction dangereuse"),
