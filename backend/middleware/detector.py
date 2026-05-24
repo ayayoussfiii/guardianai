@@ -31,7 +31,7 @@ SUSPICIOUS_KEYWORDS = {
     ],
 }
 
-# Seuil de confiance pour bloquer
+
 CONFIDENCE_THRESHOLD = 0.70
 
 
