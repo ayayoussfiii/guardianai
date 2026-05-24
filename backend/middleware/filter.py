@@ -60,7 +60,7 @@ class ResponseFilter:
                     details=f"Contenu bloqué : {label}",
                 )
 
-        # 2. Masquage des données sensibles → laisser passer nettoyé
+        # 2. Masquage des donnees sensibles → laisser passer nettoye
         cleaned = text
         masked_items = []
 
