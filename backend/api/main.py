@@ -15,7 +15,6 @@ from middleware.detector import IntentDetector
 from middleware.filter   import ResponseFilter
 
 
-# ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title       = "GuardianAI",
