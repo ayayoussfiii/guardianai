@@ -1,4 +1,5 @@
 """
+Ce fichier est la couche analytique il enregistre tt ce qui ce passe et l affiche en temps reel sur la dashboard 
 routes.py — Routes supplémentaires (stats, historique, config)
 """
 
