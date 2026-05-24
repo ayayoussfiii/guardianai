@@ -36,7 +36,7 @@ detector = IntentDetector(use_ml=False)   # passer True pour activer le ML
 filter_  = ResponseFilter()
 
 
-# ── Schémas Pydantic ──────────────────────────────────────────────────────────
+
 
 class PromptRequest(BaseModel):
     prompt    : str
