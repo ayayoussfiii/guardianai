@@ -1,7 +1,3 @@
-"""
-scanner.py — Détection rapide par patterns (regex + heuristiques)
-Première ligne de défense, objectif < 5ms
-"""
 
 import re
 from dataclasses import dataclass
