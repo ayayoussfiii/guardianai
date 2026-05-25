@@ -1,114 +1,130 @@
-"""
-detector.py — Classifier ML pour détecter les intentions malveillantes
-Deuxième ligne de défense, basé sur un modèle léger HuggingFace
-"""
-
-from __future__ import annotations
-from dataclasses import dataclass
-from .scanner import ThreatLevel, ThreatType, ScanResult
+import time
+import uuid
+from collections import defaultdict
+from typing import TypedDict
 
 
-@dataclass
-class DetectionResult:
-    threat_level: ThreatLevel
-    threat_type : ThreatType
-    confidence  : float
-    details     : str
+class DetectionResult(TypedDict):
+    malicious: bool
+    reason: str | None
 
 
+class SessionContext:
+    def __init__(self):
+        self.messages: list[str] = []
+        self.flags: list[str] = []
+        self.created_at: float = time.time()
+        self.last_seen: float = time.time()
+        self.flag_count: int = 0
 
 
-SUSPICIOUS_KEYWORDS = {
-    ThreatType.JAILBREAK: [
-        "jailbreak", "bypass", "unrestricted", "no limits", "no rules",
-        "override", "ignore instructions", "disregard", "without restrictions",
-        "as an AI without", "you are free to",
-    ],
-    ThreatType.PROMPT_INJECTION: [
-        "new instructions", "updated instructions", "your real instructions",
-        "hidden instructions", "secret prompt", "system prompt", "ignore previous",
-        "disregard above", "forget previous",
-    ],
-}
+class Detector:
+    """
+    Profil A — Détection des attaques multi-tours et suivi de session.
+    Garde le contexte de conversation pour repérer les attaques
+    progressives (ex: jailbreak par étapes).
 
+    Le moteur IA sémantique (Profil B) viendra se brancher ici
+    via le contrat API défini en commun.
+    """
 
-CONFIDENCE_THRESHOLD = 0.70
+    MAX_FLAGS_PER_SESSION = 3   # blocage après N signalements
+    SESSION_TTL = 3600          # 1h en secondes
+    MAX_SESSIONS = 10000        # limite mémoire
 
+    # Patterns multi-tours (détectables seulement avec contexte)
+    ESCALATION_KEYWORDS = [
+        "maintenant", "now", "alors", "donc", "et si",
+        "what if", "suppose", "imagine", "hypothetically",
+        "just pretend", "let's say", "as a game"
+    ]
 
-class IntentDetector:
+    def __init__(self):
+        self._sessions: dict[str, SessionContext] = {}
 
-    def __init__(self, use_ml: bool = False):
-        """
-        use_ml=False  → mode heuristique (rapide, pas de dépendances)
-        use_ml=True   → mode ML avec HuggingFace (plus précis, plus lent)
-        """
-        self.use_ml = use_ml
-        self._model = None
+    def _get_or_create(self, session_id: str | None) -> tuple[str, SessionContext]:
+        if not session_id or session_id not in self._sessions:
+            sid = session_id or str(uuid.uuid4())
+            self._sessions[sid] = SessionContext()
+            self._cleanup_old_sessions()
+            return sid, self._sessions[sid]
+        ctx = self._sessions[session_id]
+        ctx.last_seen = time.time()
+        return session_id, ctx
 
-        if use_ml:
-            self._load_model()
+    def detect(self, prompt: str, session_id: str | None = None) -> DetectionResult:
+        sid, ctx = self._get_or_create(session_id)
 
-    def _load_model(self):
-        """Charge le modèle HuggingFace (lazy loading)."""
-        try:
-            from transformers import pipeline
-            self._model = pipeline(
-                "text-classification",
-                model="martin-ha/toxic-comment-model",
-                truncation=True,
-                max_length=512,
+        # Vérification : session déjà blacklistée
+        if ctx.flag_count >= self.MAX_FLAGS_PER_SESSION:
+            return {
+                "malicious": True,
+                "reason": f"Session bloquée après {ctx.flag_count} signalements"
+            }
+
+        # Détection d'escalade progressive
+        if len(ctx.messages) > 0:
+            result = self._check_escalation(prompt, ctx)
+            if result["malicious"]:
+                ctx.flag_count += 1
+                ctx.flags.append(result["reason"])
+                return result
+
+        # Enregistrement du message dans la session
+        ctx.messages.append(prompt)
+        return {"malicious": False, "reason": None}
+
+    def _check_escalation(self, prompt: str, ctx: SessionContext) -> DetectionResult:
+        """Détecte les attaques progressives sur plusieurs tours"""
+        prompt_lower = prompt.lower()
+
+        # Si le message précédent contenait une mise en scène
+        # et que le nouveau utilise un mot d'escalade → suspicion
+        prev = ctx.messages[-1].lower() if ctx.messages else ""
+        role_setup_keywords = ["pretend", "imagine", "rôle", "joue", "play", "scenario"]
+
+        prev_has_roleplay = any(k in prev for k in role_setup_keywords)
+        curr_has_escalation = any(k in prompt_lower for k in self.ESCALATION_KEYWORDS)
+
+        if prev_has_roleplay and curr_has_escalation and len(prompt) > 50:
+            return {
+                "malicious": True,
+                "reason": "Escalade détectée : tentative de jailbreak multi-tours"
+            }
+
+        return {"malicious": False, "reason": None}
+
+    def get_session(self, session_id: str) -> dict | None:
+        ctx = self._sessions.get(session_id)
+        if not ctx:
+            return None
+        return {
+            "session_id": session_id,
+            "message_count": len(ctx.messages),
+            "flag_count": ctx.flag_count,
+            "flags": ctx.flags,
+            "created_at": ctx.created_at,
+            "last_seen": ctx.last_seen,
+        }
+
+    def clear_session(self, session_id: str):
+        self._sessions.pop(session_id, None)
+
+    def _cleanup_old_sessions(self):
+        """Supprime les sessions expirées pour libérer la mémoire"""
+        now = time.time()
+        expired = [
+            sid for sid, ctx in self._sessions.items()
+            if now - ctx.last_seen > self.SESSION_TTL
+        ]
+        for sid in expired:
+            del self._sessions[sid]
+
+        # Si encore trop de sessions, supprime les plus anciennes
+        if len(self._sessions) > self.MAX_SESSIONS:
+            sorted_sessions = sorted(
+                self._sessions.items(),
+                key=lambda x: x[1].last_seen
             )
-        except ImportError:
-            print("[GuardianAI] transformers non installé, fallback heuristique.")
-            self.use_ml = False
-
-    def detect(self, text: str) -> DetectionResult:
-        """Analyse l'intention du texte."""
-        if self.use_ml and self._model:
-            return self._detect_ml(text)
-        return self._detect_heuristic(text)
-
-    def _detect_heuristic(self, text: str) -> DetectionResult:
-        """Détection par mots-clés pondérés."""
-        text_lower = text.lower()
-        scores: dict[ThreatType, float] = {}
-
-        for threat_type, keywords in SUSPICIOUS_KEYWORDS.items():
-            matches = sum(1 for kw in keywords if kw in text_lower)
-            if matches:
-                scores[threat_type] = min(0.5 + (matches * 0.15), 0.95)
-
-        if not scores:
-            return DetectionResult(
-                threat_level=ThreatLevel.SAFE,
-                threat_type=ThreatType.NONE,
-                confidence=1.0,
-                details="Intention normale détectée",
-            )
-
-        top_threat = max(scores, key=lambda t: scores[t])
-        confidence = scores[top_threat]
-
-        level = ThreatLevel.HIGH if confidence >= CONFIDENCE_THRESHOLD else ThreatLevel.LOW
-
-        return DetectionResult(
-            threat_level=level,
-            threat_type=top_threat,
-            confidence=confidence,
-            details=f"Intention suspecte ({top_threat.value}), confiance : {confidence:.0%}",
-        )
-
-    def _detect_ml(self, text: str) -> DetectionResult:
-        """Détection via modèle ML HuggingFace."""
-        result = self._model(text)[0]
-        label      = result["label"]
-        confidence = result["score"]
-
-        is_threat = label == "toxic" and confidence >= CONFIDENCE_THRESHOLD
-
-        return DetectionResult(
-            threat_level=ThreatLevel.HIGH if is_threat else ThreatLevel.SAFE,
-            threat_type=ThreatType.JAILBREAK if is_threat else ThreatType.NONE,
-            confidence=confidence,
-            details=f"Modèle ML → label: {label}, confiance: {confidence:.0%}",
-        )
+            for sid, _ in sorted_sessions[:len(self._sessions) - self.MAX_SESSIONS]:
+                del self._sessions[sid]
