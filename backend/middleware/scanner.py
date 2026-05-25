@@ -8,11 +8,7 @@ class ScanResult(TypedDict):
 
 
 class Scanner:
-    """
-    Profil A — Première ligne de défense.
-    Détecte les patterns malveillants connus via regex
-    avant même d'appeler le moteur IA (Profil B).
-    """
+   
 
     BLACKLIST_PATTERNS = [
         # Prompt injection classiques
