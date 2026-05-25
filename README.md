@@ -360,7 +360,7 @@ Request
 
 ---
 
-## ⚙️ Configuration
+##  Configuration
 
 All configuration is done via environment variables in `.env`:
 
@@ -374,7 +374,7 @@ All configuration is done via environment variables in `.env`:
 
 ---
 
-## 🧪 Testing
+##  Testing
 
 Run the full test suite:
 
