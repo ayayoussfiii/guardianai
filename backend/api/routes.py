@@ -1,120 +1,101 @@
-"""
-Ce fichier est la couche analytique il enregistre tt ce qui ce passe et l affiche en temps reel sur la dashboard 
-routes.py — Routes supplémentaires (stats, historique, config)
-"""
-
-from __future__ import annotations
-import uuid
-from datetime import datetime
-from collections import deque
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from middleware.scanner import Scanner
+from middleware.filter import Filter
+from middleware.detector import Detector
+import httpx
+import os
 
-router = APIRouter(prefix="/api", tags=["analytics"])
+router = APIRouter()
 
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
-# ── Stockage en mémoire (remplacer par Redis/DB en prod) ──────────────────────
-
-MAX_HISTORY = 500
-_history: deque[dict] = deque(maxlen=MAX_HISTORY)
-_stats = {
-    "total_requests" : 0,
-    "blocked"        : 0,
-    "allowed"        : 0,
-    "jailbreaks"     : 0,
-    "injections"     : 0,
-    "pii_leaks"      : 0,
-    "secret_leaks"   : 0,
-}
+scanner = Scanner()
+filter_ = Filter()
+detector = Detector()
 
 
-# ── Schémas ───────────────────────────────────────────────────────────────────
-
-class EventLog(BaseModel):
-    request_id  : str
-    timestamp   : str
-    allowed     : bool
-    threat_level: str
-    threat_type : str
-    confidence  : float
-    details     : str
-    latency_ms  : float
+class ChatRequest(BaseModel):
+    model: str = "llama3"
+    prompt: str
+    stream: bool = False
+    session_id: str | None = None
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def log_event(allowed: bool, threat_level: str, threat_type: str,
-              confidence: float, details: str, latency_ms: float):
-    """Enregistre un événement dans l'historique et met à jour les stats."""
-
-    event = EventLog(
-        request_id   = str(uuid.uuid4()),
-        timestamp    = datetime.utcnow().isoformat(),
-        allowed      = allowed,
-        threat_level = threat_level,
-        threat_type  = threat_type,
-        confidence   = confidence,
-        details      = details,
-        latency_ms   = latency_ms,
-    )
-
-    _history.appendleft(event.dict())
-    _stats["total_requests"] += 1
-
-    if allowed:
-        _stats["allowed"] += 1
-    else:
-        _stats["blocked"] += 1
-
-    if threat_type == "jailbreak":
-        _stats["jailbreaks"] += 1
-    elif threat_type == "prompt_injection":
-        _stats["injections"] += 1
-    elif threat_type == "pii_leak":
-        _stats["pii_leaks"] += 1
-    elif threat_type == "secret_leak":
-        _stats["secret_leaks"] += 1
+class ChatResponse(BaseModel):
+    response: str
+    blocked: bool = False
+    reason: str | None = None
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+@router.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    # Etape 1 : scan du prompt entrant
+    scan_result = scanner.scan(request.prompt)
+    if scan_result["flagged"]:
+        return ChatResponse(
+            response="",
+            blocked=True,
+            reason=scan_result["reason"]
+        )
 
-@router.get("/stats")
-def get_stats():
-    """Retourne les statistiques globales."""
-    total = _stats["total_requests"]
-    return {
-        **_stats,
-        "block_rate": round(_stats["blocked"] / total * 100, 2) if total > 0 else 0,
-    }
+    # Etape 2 : detection d'intention malveillante
+    detection = detector.detect(request.prompt, session_id=request.session_id)
+    if detection["malicious"]:
+        return ChatResponse(
+            response="",
+            blocked=True,
+            reason=detection["reason"]
+        )
+
+    # Etape 3 : filtrage du contenu
+    filtered_prompt = filter_.clean(request.prompt)
+
+    # Etape 4 : transfert vers Ollama
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={
+                    "model": request.model,
+                    "prompt": filtered_prompt,
+                    "stream": False
+                }
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return ChatResponse(response=data.get("response", ""))
+
+    except httpx.ConnectError:
+        raise HTTPException(status_code=502, detail="Ollama inaccessible")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=str(e))
 
 
-@router.get("/history")
-def get_history(limit: int = 50):
-    """Retourne les derniers événements loggés."""
-    return list(_history)[:limit]
+@router.get("/models")
+async def list_models():
+    """Liste les modèles disponibles sur Ollama"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{OLLAMA_URL}/api/tags")
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.ConnectError:
+        raise HTTPException(status_code=502, detail="Ollama inaccessible")
 
 
-@router.get("/history/{threat_type}")
-def get_history_by_type(threat_type: str, limit: int = 50):
-    """Filtre l'historique par type de menace."""
-    filtered = [e for e in _history if e["threat_type"] == threat_type]
-    return filtered[:limit]
+@router.get("/sessions/{session_id}")
+def get_session(session_id: str):
+    """Récupère le contexte d'une session"""
+    ctx = detector.get_session(session_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Session introuvable")
+    return ctx
 
 
-@router.delete("/history")
-def clear_history():
-    """Vide l'historique (admin seulement en prod)."""
-    _history.clear()
-    return {"message": "Historique vidé"}
-
-
-@router.get("/config")
-def get_config():
-    """Retourne la configuration actuelle de GuardianAI."""
-    return {
-        "version"           : "1.0.0",
-        "ml_enabled"        : False,
-        "max_history"       : MAX_HISTORY,
-        "confidence_threshold": 0.70,
-        "latency_target_ms" : 50,
-    }
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str):
+    """Supprime une session"""
+    detector.clear_session(session_id)
+    return {"deleted": True, "session_id": session_id}
