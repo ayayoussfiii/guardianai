@@ -185,7 +185,7 @@ guardianai/
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
