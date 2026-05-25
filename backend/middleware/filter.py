@@ -1,80 +1,31 @@
-"""
-filter.py — Filtrage et sanitisation des réponses du LLM
-Dernière ligne de défense avant de renvoyer la réponse à l'utilisateur
-"""
-
-from __future__ import annotations
 import re
-from dataclasses import dataclass
+import html
 
 
-@dataclass
-class FilterResult:
-    is_safe       : bool
-    original_text : str
-    filtered_text : str
-    details       : str
+class Filter:
+    """
+    Profil A — Nettoyage du prompt avant envoi à Ollama.
+    Supprime les injections HTML/script, normalise les espaces,
+    et retire les tentatives d'échappement de contexte.
+    """
 
+    def clean(self, prompt: str) -> str:
+        # Décodage HTML (évite les encodages d'injection)
+        prompt = html.unescape(prompt)
 
-# ── Patterns dangers 
+        # Suppression des balises HTML/XML
+        prompt = re.sub(r"<[^>]+>", "", prompt)
 
-DANGEROUS_OUTPUT_PATTERNS = [
-    (r"(?i)here('s| is) how to (make|build|create) (a )?(bomb|weapon|malware|virus)", "instruction dangereuse"),
-    (r"(?i)step\s*\d+.*?(hack|exploit|bypass|inject)",                                "guide d'attaque"),
-    (r"sk-[a-zA-Z0-9]{48}",                                                           "clé API exposée"),
-    (r"AKIA[0-9A-Z]{16}",                                                             "clé AWS exposée"),
-    (r"-----BEGIN (RSA |EC )?PRIVATE KEY-----",                                       "clé privée exposée"),
-    (r"(?i)(password|secret|token)\s*[:=]\s*['\"]?\S+['\"]?",                        "credential exposé"),
-]
+        # Suppression des séquences d'échappement ANSI
+        prompt = re.sub(r"\x1b\[[0-9;]*m", "", prompt)
 
-# ── Patterns à masquer (PII dans les réponses) ────────────────────────────────
+        # Suppression des caractères de contrôle (sauf newline/tab)
+        prompt = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", prompt)
 
-MASK_PATTERNS = [
-    (r"\b\d{3}-\d{2}-\d{4}\b",                                        "***-**-****"),
-    (r"\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b",                     "**** **** **** ****"),
-    (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",          "[email masqué]"),
-    (r"\b(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b", "[téléphone masqué]"),
-]
+        # Normalisation des espaces multiples
+        prompt = re.sub(r"[ \t]{2,}", " ", prompt)
 
+        # Suppression des lignes vides excessives (max 2 newlines consécutifs)
+        prompt = re.sub(r"\n{3,}", "\n\n", prompt)
 
-class ResponseFilter:
-
-    def __init__(self):
-        self._dangerous = [(re.compile(p), label) for p, label in DANGEROUS_OUTPUT_PATTERNS]
-        self._mask      = [(re.compile(p), replacement) for p, replacement in MASK_PATTERNS]
-
-    def filter(self, text: str) -> FilterResult:
-        """
-        Analyse et nettoie la réponse du LLM.
-        - Bloque si contenu dangereux détecté
-        - Masque les données sensibles sinon
-        """
-
-        # 1. Vérification contenu dangereux → bloquer
-        for pattern, label in self._dangerous:
-            if pattern.search(text):
-                return FilterResult(
-                    is_safe=False,
-                    original_text=text,
-                    filtered_text="[Réponse bloquée par GuardianAI : contenu dangereux détecté]",
-                    details=f"Contenu bloqué : {label}",
-                )
-
-        # 2. Masquage des donnees sensibles → laisser passer nettoye
-        cleaned = text
-        masked_items = []
-
-        for pattern, replacement in self._mask:
-            new_text, count = pattern.subn(replacement, cleaned)
-            if count > 0:
-                cleaned = new_text
-                masked_items.append(f"{count} occurrence(s) masquée(s)")
-
-        details = "Réponse propre" if not masked_items else " | ".join(masked_items)
-
-        return FilterResult(
-            is_safe=True,
-            original_text=text,
-            filtered_text=cleaned,
-            details=details,
-        )
+        return prompt.strip()
