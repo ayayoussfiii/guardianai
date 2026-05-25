@@ -408,7 +408,7 @@ tests/test_scanner.py::test_detector_session_created    PASSED
 
 ---
 
-## 🗺 Roadmap
+##  Roadmap
 
 - [x] Core proxy with FastAPI
 - [x] Scanner — regex-based threat detection
