@@ -237,7 +237,7 @@ Interactive docs at **http://localhost:8000/docs**
 
 ---
 
-## 📡 API Reference
+##  API Reference
 
 ### `POST /api/chat`
 
@@ -384,27 +384,7 @@ pip install pytest pytest-asyncio
 pytest tests/ -v
 ```
 
-Expected output:
 
-```
-tests/test_api.py::test_health                          PASSED
-tests/test_api.py::test_chat_blocked_injection          PASSED
-tests/test_api.py::test_chat_blocked_jailbreak          PASSED
-tests/test_api.py::test_chat_clean_prompt               PASSED
-tests/test_api.py::test_session_not_found               PASSED
-tests/test_scanner.py::test_scanner_clean               PASSED
-tests/test_scanner.py::test_scanner_injection           PASSED
-tests/test_scanner.py::test_scanner_jailbreak_dan       PASSED
-tests/test_scanner.py::test_scanner_system_extraction   PASSED
-tests/test_scanner.py::test_scanner_too_long            PASSED
-tests/test_scanner.py::test_scanner_token_injection     PASSED
-tests/test_scanner.py::test_filter_removes_html         PASSED
-tests/test_scanner.py::test_filter_normalizes_spaces    PASSED
-tests/test_scanner.py::test_detector_clean              PASSED
-tests/test_scanner.py::test_detector_session_created    PASSED
-
-15 passed in 0.87s ✅
-```
 
 ---
 
