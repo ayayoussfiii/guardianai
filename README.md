@@ -316,7 +316,7 @@ Health check endpoint.
 
 ---
 
-## 🛡 Security Pipeline
+##  Security Pipeline
 
 Every request goes through **3 sequential layers** before reaching Ollama:
 
