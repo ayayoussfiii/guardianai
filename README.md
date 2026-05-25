@@ -40,7 +40,7 @@
 
 ---
 
-## 🧭 Overview
+##  Overview
 
 GuardianAI is a **security proxy** that sits between your application and a local LLM (Ollama). Every request passes through a multi-layer analysis pipeline before reaching the model — detecting and blocking malicious inputs in real time.
 
@@ -56,7 +56,7 @@ GuardianAI is a **security proxy** that sits between your application and a loca
 
 ---
 
-## 🏗 Architecture
+##  Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
