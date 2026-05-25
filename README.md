@@ -91,7 +91,7 @@ GuardianAI is a **security proxy** that sits between your application and a loca
 
 ---
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 guardianai/
@@ -138,9 +138,9 @@ guardianai/
 
 ---
 
-## 👥 Workflow
+##  Workflow
 
-### 👤 Profil A — Lead Backend & Core Proxy
+### — Lead Backend & Core Proxy
 
 > **Mission** : Intercepter le trafic, garantir la haute performance et gérer les communications externes.
 
@@ -153,7 +153,7 @@ guardianai/
 | **Detector** | `middleware/detector.py` | Tracking sessions, attaques multi-tours |
 | **Tests** | `tests/` | Couverture unitaire et d'intégration |
 
-### 👤 Profil B — Lead IA, Data & DevOps
+###  Lead IA, Data & DevOps
 
 > **Mission** : Détecter les menaces sémantiques et assurer la scalabilité du bouclier.
 
@@ -164,9 +164,9 @@ guardianai/
 | **Orchestration** | LangChain pour chaîner les vérifications de sécurité |
 | **DevOps** | Docker, Kubernetes, Prometheus/Grafana |
 
-### 🤝 Shared Contract
 
-Both profiles communicate via a **strict JSON API contract** defined at `middleware/detector.py`:
+
+ communication via a **strict JSON API contract** defined at `middleware/detector.py`:
 
 ```json
 {
