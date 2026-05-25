@@ -138,7 +138,7 @@ guardianai/
 
 ---
 
-## 👥 Team & Responsibilities
+## 👥 Workflow
 
 ### 👤 Profil A — Lead Backend & Core Proxy
 
