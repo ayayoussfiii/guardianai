@@ -1,6 +1,5 @@
 """
-backend/middleware/__init__.py
-──────────────────────────────
+
 Point d'entrée du package middleware.
 
 Expose les trois composants du pipeline de sécurité ainsi que
