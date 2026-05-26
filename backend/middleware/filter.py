@@ -3,11 +3,7 @@ import html
 
 
 class Filter:
-    """
-    Profil A — Nettoyage du prompt avant envoi à Ollama.
-    Supprime les injections HTML/script, normalise les espaces,
-    et retire les tentatives d'échappement de contexte.
-    """
+    
 
     def clean(self, prompt: str) -> str:
         # Décodage HTML (évite les encodages d'injection)
