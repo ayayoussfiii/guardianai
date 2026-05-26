@@ -3,14 +3,7 @@ middleware/filter.py
 ────────────────────
 Nettoyage du prompt avant envoi au LLM.
 
-Améliorations vs v1 :
-  • Résultat structuré (FilterResult) : prompt nettoyé + liste des transformations
-  • Normalisation Unicode cohérente avec scanner.py (NFC, homoglyphes, zero-width)
-  • Couverture ANSI étendue (séquences OSC, hyperlinks, paramètres multi-champs)
-  • Suppression des URL data: et javascript: (vecteurs d'injection courants)
-  • Troncature configurable avec signal explicite dans les transformations
-  • Pipeline de passes nommées → traçabilité et tests unitaires par passe
-  • Statistiques d'utilisation
+
 """
 
 import html
