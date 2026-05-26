@@ -16,7 +16,6 @@ from typing import Callable, TypedDict
 logger = logging.getLogger(__name__)
 
 
-# ─── Contrats typés ──────────────────────────────────────────────────────────
 
 class FilterResult(TypedDict):
     cleaned:         str
