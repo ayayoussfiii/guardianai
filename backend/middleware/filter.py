@@ -46,7 +46,6 @@ def _strip_dangerous_urls(text: str) -> str:
     return _URL_DANGEROUS.sub("[url supprimée]", text)
 
 
-# Séquences ANSI/VT100 étendues : CSI (ESC[…), OSC (ESC]…BEL/ST), séquences Fx
 _ANSI_RE = re.compile(
     r"\x1b(?:"
     r"\[[0-9;?]*[ -/]*[@-~]"   # CSI : ESC [ … lettre finale
