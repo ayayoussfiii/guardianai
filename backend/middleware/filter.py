@@ -3,7 +3,6 @@ middleware/filter.py
 ────────────────────
 Nettoyage du prompt avant envoi au LLM.
 
-Corrections vs v1 :
   • Thread-safe : _call_count et _total_removed protégés par threading.Lock
   • strip() promu en passe explicite du pipeline (traçable, désactivable)
   • Troncature déplacée en méthode privée _truncate()
