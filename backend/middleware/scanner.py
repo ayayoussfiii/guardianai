@@ -3,15 +3,6 @@ middleware/scanner.py
 ─────────────────────
 Analyse statique d'un prompt avant tout traitement LLM.
 
-Améliorations vs v1 :
-  • Normalisation Unicode (homoglyphes, zero-width chars, encodages alternatifs)
-  • Niveaux de sévérité : BLOCK / WARN (warn = logué mais non bloquant, configurable)
-  • Rapport complet : toutes les correspondances trouvées, pas seulement la première
-  • Patterns organisés par catégorie (dataclass) et facilement extensibles
-  • Statistiques d'utilisation (nb scans, nb bloqués) pour observabilité
-  • MAX_LENGTH synchronisé avec la validation Pydantic du router
-
-Corrections vs v2 :
   • Mutable default argument corrigé : _result(matches=[]) → matches=None
   • Compteurs thread-safe via threading.Lock
   • Comparaison de sévérité unifiée (toujours .value, jamais l'Enum brut)
