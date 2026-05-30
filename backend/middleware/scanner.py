@@ -3,19 +3,27 @@ middleware/scanner.py
 ─────────────────────
 Analyse statique d'un prompt avant tout traitement LLM.
 
-
+Améliorations vs v1 :
   • Normalisation Unicode (homoglyphes, zero-width chars, encodages alternatifs)
   • Niveaux de sévérité : BLOCK / WARN (warn = logué mais non bloquant, configurable)
   • Rapport complet : toutes les correspondances trouvées, pas seulement la première
   • Patterns organisés par catégorie (dataclass) et facilement extensibles
   • Statistiques d'utilisation (nb scans, nb bloqués) pour observabilité
   • MAX_LENGTH synchronisé avec la validation Pydantic du router
+
+Corrections vs v2 :
+  • Mutable default argument corrigé : _result(matches=[]) → matches=None
+  • Compteurs thread-safe via threading.Lock
+  • Comparaison de sévérité unifiée (toujours .value, jamais l'Enum brut)
+  • _result() reçoit severity: str | None (plus de couplage avec Severity)
+  • Règles injectables via le constructeur (testabilité, extensibilité)
 """
 
 import logging
 import re
+import threading
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import TypedDict
 
@@ -32,7 +40,7 @@ class Severity(str, Enum):
 class Match(TypedDict):
     pattern:  str
     reason:   str
-    severity: str
+    severity: str   # toujours une str (Severity.value)
 
 
 class ScanResult(TypedDict):
@@ -52,50 +60,44 @@ class Rule:
 
 
 # Règles groupées par catégorie pour la lisibilité et la maintenance
-_RULES: list[Rule] = [
+DEFAULT_RULES: list[Rule] = [
 
     # ── Prompt injection ──────────────────────────────────────────────────────
-    Rule(r"ignore\s+(all\s+)?previous\s+instructions?",         "Prompt injection — previous instructions"),
-    Rule(r"disregard\s+(your\s+)?instructions?",                "Prompt injection — disregard"),
-    Rule(r"do\s+not\s+follow\s+(your\s+)?instructions?",        "Prompt injection — do not follow"),
-    Rule(r"override\s+(your\s+)?(rules?|instructions?)",        "Prompt injection — override"),
+    Rule(r"ignore\s+(all\s+)?previous\s+instructions?",          "Prompt injection — previous instructions"),
+    Rule(r"disregard\s+(your\s+)?instructions?",                 "Prompt injection — disregard"),
+    Rule(r"do\s+not\s+follow\s+(your\s+)?instructions?",         "Prompt injection — do not follow"),
+    Rule(r"override\s+(your\s+)?(rules?|instructions?)",         "Prompt injection — override"),
 
     # ── Jailbreak identité / rôle ─────────────────────────────────────────────
-    Rule(r"you\s+are\s+now\s+(?!an?\s+(helpful\s+)?assistant)", "Jailbreak — redéfinition de rôle"),
+    Rule(r"you\s+are\s+now\s+(?!an?\s+(helpful\s+)?assistant)",  "Jailbreak — redéfinition de rôle"),
     Rule(r"act\s+as\s+(if\s+you\s+(are|were)\s+)?(?!an?\s+(helpful\s+)?assistant)", "Jailbreak — act as"),
-    Rule(r"forget\s+(that\s+you\s+are|you\s+are|your\s+)",      "Jailbreak — oubli d'identité"),
-    Rule(r"pretend\s+(you\s+)?(are|have\s+no)",                 "Jailbreak — pretend"),
-    Rule(r"you\s+have\s+no\s+(restrictions?|limits?|rules?)",   "Jailbreak — suppression de contraintes"),
+    Rule(r"forget\s+(that\s+you\s+are|you\s+are|your\s+)",       "Jailbreak — oubli d'identité"),
+    Rule(r"pretend\s+(you\s+)?(are|have\s+no)",                  "Jailbreak — pretend"),
+    Rule(r"you\s+have\s+no\s+(restrictions?|limits?|rules?)",    "Jailbreak — suppression de contraintes"),
 
     # ── Bypass explicite ──────────────────────────────────────────────────────
     Rule(r"bypass\s+(your\s+)?(safety|filter|restriction|guard|policy)", "Bypass — safety"),
-    Rule(r"jailbreak",                                          "Bypass — jailbreak explicite"),
-    Rule(r"\bDAN\s+mode\b",                                     "Bypass — mode DAN"),
+    Rule(r"jailbreak",                                           "Bypass — jailbreak explicite"),
+    Rule(r"\bDAN\s+mode\b",                                      "Bypass — mode DAN"),
     Rule(r"without\s+(any\s+)?(restrictions?|censorship|filters?)", "Bypass — sans restrictions"),
 
     # ── Extraction du prompt système ──────────────────────────────────────────
     Rule(r"reveal\s+(your\s+)?(system\s+prompt|instructions?|prompt)", "Extraction — system prompt"),
-    Rule(r"show\s+(me\s+)?(your\s+)?(system\s+)?prompt",        "Extraction — show prompt"),
-    Rule(r"what\s+(are|were)\s+your\s+instructions?",           "Extraction — instructions"),
-    Rule(r"repeat\s+(the\s+)?(text|words?|content)\s+above",    "Extraction — repeat above"),
-    Rule(r"output\s+(your\s+)?initial\s+(prompt|message)",      "Extraction — initial prompt"),
+    Rule(r"show\s+(me\s+)?(your\s+)?(system\s+)?prompt",         "Extraction — show prompt"),
+    Rule(r"what\s+(are|were)\s+your\s+instructions?",            "Extraction — instructions"),
+    Rule(r"repeat\s+(the\s+)?(text|words?|content)\s+above",     "Extraction — repeat above"),
+    Rule(r"output\s+(your\s+)?initial\s+(prompt|message)",       "Extraction — initial prompt"),
 
     # ── Injection de tokens / formats ─────────────────────────────────────────
-    Rule(r"<\|?\s*(system|im_start|im_end)\s*\|?>",             "Injection — token système"),
-    Rule(r"\[INST\]|\[\/INST\]",                                "Injection — format instruction"),
-    Rule(r"<<SYS>>|<</SYS>>",                                   "Injection — balise système Llama"),
-    Rule(r"###\s*System\s*:",                                    "Injection — header System"),
+    Rule(r"<\|?\s*(system|im_start|im_end)\s*\|?>",              "Injection — token système"),
+    Rule(r"\[INST\]|\[\/INST\]",                                 "Injection — format instruction"),
+    Rule(r"<<SYS>>|<</SYS>>",                                    "Injection — balise système Llama"),
+    Rule(r"###\s*System\s*:",                                     "Injection — header System"),
 
     # ── Signaux d'alerte (WARN, non bloquants par défaut) ────────────────────
-    Rule(r"hypothetically\s+(speaking)?",                       "Signal — hypothetically",   Severity.WARN),
-    Rule(r"for\s+(a\s+)?fiction(al)?\s+(story|novel|book)",     "Signal — fiction framing",  Severity.WARN),
-    Rule(r"in\s+a\s+(video\s+)?game\s+context",                 "Signal — game framing",     Severity.WARN),
-]
-
-# Compilation unique au chargement du module
-_COMPILED: list[tuple[re.Pattern, Rule]] = [
-    (re.compile(rule.pattern, re.IGNORECASE), rule)
-    for rule in _RULES
+    Rule(r"hypothetically\s+(speaking)?",                        "Signal — hypothetically",  Severity.WARN),
+    Rule(r"for\s+(a\s+)?fiction(al)?\s+(story|novel|book)",      "Signal — fiction framing", Severity.WARN),
+    Rule(r"in\s+a\s+(video\s+)?game\s+context",                  "Signal — game framing",    Severity.WARN),
 ]
 
 
@@ -134,101 +136,150 @@ def _normalize(text: str) -> str:
 
 # ─── Scanner ─────────────────────────────────────────────────────────────────
 
+# Type interne : règle compilée
+_CompiledRule = tuple[re.Pattern[str], Rule]
+
+
 class Scanner:
     """
     Analyse statique d'un prompt.
 
+    Thread-safe. Les compteurs internes sont protégés par un Lock.
+
     Par défaut, seuls les BLOCK déclenchent `flagged=True`.
     Passer `block_on_warn=True` pour durcir la politique.
+
+    Paramètres
+    ----------
+    block_on_warn : bool
+        Si True, les règles WARN bloquent aussi la requête.
+    rules : list[Rule] | None
+        Jeu de règles personnalisé. None = DEFAULT_RULES.
+        Permet d'injecter des règles en test sans monkey-patching.
     """
 
     MAX_LENGTH = 8_192   # aligné avec la validation Pydantic du router
 
-    def __init__(self, block_on_warn: bool = False):
+    def __init__(
+        self,
+        block_on_warn: bool = False,
+        rules: list[Rule] | None = None,
+    ):
         self.block_on_warn = block_on_warn
+
+        # Compilation des règles à l'instanciation (pas au chargement du module)
+        # → chaque instance peut avoir son propre jeu de règles
+        effective_rules  = rules if rules is not None else DEFAULT_RULES
+        self._compiled: list[_CompiledRule] = [
+            (re.compile(rule.pattern, re.IGNORECASE), rule)
+            for rule in effective_rules
+        ]
+
+        self._lock        = threading.Lock()
         self._scan_count  = 0
         self._block_count = 0
 
     # ── API publique ──────────────────────────────────────────────────────────
 
     def scan(self, prompt: str) -> ScanResult:
-        self._scan_count += 1
-
         # ① Vérification longueur (avant normalisation pour la perf)
         if len(prompt) > self.MAX_LENGTH:
-            self._block_count += 1
-            return self._result(
+            self._increment(blocked=True)
+            return _result(
                 flagged=True,
                 reason=f"Prompt trop long ({len(prompt)} > {self.MAX_LENGTH} chars)",
-                severity=Severity.BLOCK,
+                severity=Severity.BLOCK.value,
             )
 
         normalized = _normalize(prompt)
-        matches: list[Match] = []
-
-        # ② Recherche de tous les patterns
-        for compiled, rule in _COMPILED:
-            if compiled.search(normalized):
-                matches.append({
-                    "pattern":  rule.pattern,
-                    "reason":   rule.reason,
-                    "severity": rule.severity.value,
-                })
+        matches    = self._find_matches(normalized)
 
         if not matches:
-            return self._result(flagged=False)
+            self._increment(blocked=False)
+            return _result(flagged=False)
 
-        # ③ Décision selon la sévérité la plus haute trouvée
-        has_block = any(m["severity"] == Severity.BLOCK for m in matches)
-        has_warn  = any(m["severity"] == Severity.WARN  for m in matches)
+        # ② Décision selon la sévérité la plus haute trouvée
+        has_block = any(m["severity"] == Severity.BLOCK.value for m in matches)
+        has_warn  = any(m["severity"] == Severity.WARN.value  for m in matches)
 
         if has_block or (has_warn and self.block_on_warn):
-            self._block_count += 1
-            top = next(m for m in matches if m["severity"] == Severity.BLOCK.value) if has_block else matches[0]
+            self._increment(blocked=True)
+            top_severity = Severity.BLOCK.value if has_block else Severity.WARN.value
+            top_match    = next(
+                m for m in matches if m["severity"] == top_severity
+            )
             logger.warning(
                 "Prompt bloqué | raison=%s | correspondances=%d",
-                top["reason"], len(matches),
+                top_match["reason"], len(matches),
             )
-            return self._result(
+            return _result(
                 flagged=True,
-                reason=top["reason"],
-                severity=Severity.BLOCK if has_block else Severity.WARN,
+                reason=top_match["reason"],
+                severity=top_severity,
                 matches=matches,
             )
 
-        # WARN uniquement et block_on_warn=False → loggué, non bloqué
+        # WARN uniquement et block_on_warn=False → logué, non bloqué
+        self._increment(blocked=False)
         logger.info("Prompt signalé (WARN) | %d correspondance(s)", len(matches))
-        return self._result(
+        return _result(
             flagged=False,
             reason=matches[0]["reason"],
-            severity=Severity.WARN,
+            severity=Severity.WARN.value,
             matches=matches,
         )
 
     @property
     def stats(self) -> dict:
+        with self._lock:
+            scans   = self._scan_count
+            blocked = self._block_count
         return {
-            "scans":   self._scan_count,
-            "blocked": self._block_count,
-            "passed":  self._scan_count - self._block_count,
-            "block_rate": (
-                round(self._block_count / self._scan_count, 4)
-                if self._scan_count else 0.0
-            ),
+            "scans":      scans,
+            "blocked":    blocked,
+            "passed":     scans - blocked,
+            "block_rate": round(blocked / scans, 4) if scans else 0.0,
         }
 
-    # ── Helper ────────────────────────────────────────────────────────────────
+    # ── Méthodes privées ──────────────────────────────────────────────────────
 
-    @staticmethod
-    def _result(
-        flagged:  bool             = False,
-        reason:   str | None       = None,
-        severity: Severity | None  = None,
-        matches:  list[Match]      = [],
-    ) -> ScanResult:
-        return {
-            "flagged":  flagged,
-            "reason":   reason,
-            "matches":  matches,
-            "severity": severity.value if severity else None,
-        }
+    def _find_matches(self, normalized: str) -> list[Match]:
+        """Retourne toutes les règles qui correspondent au texte normalisé."""
+        return [
+            {
+                "pattern":  rule.pattern,
+                "reason":   rule.reason,
+                "severity": rule.severity.value,   # toujours str, jamais Enum
+            }
+            for compiled, rule in self._compiled
+            if compiled.search(normalized)
+        ]
+
+    def _increment(self, *, blocked: bool) -> None:
+        """Mise à jour thread-safe des compteurs."""
+        with self._lock:
+            self._scan_count += 1
+            if blocked:
+                self._block_count += 1
+
+
+# ─── Helper module-level (pas de couplage avec Scanner) ──────────────────────
+
+def _result(
+    flagged:  bool            = False,
+    reason:   str | None      = None,
+    severity: str | None      = None,
+    matches:  list[Match] | None = None,   # ✅ None par défaut, jamais []
+) -> ScanResult:
+    """
+    Construit un ScanResult.
+
+    Reçoit severity en str (Severity.value) pour éviter tout couplage
+    avec l'Enum à l'intérieur du contrat TypedDict.
+    """
+    return {
+        "flagged":  flagged,
+        "reason":   reason,
+        "matches":  matches if matches is not None else [],
+        "severity": severity,
+    }
