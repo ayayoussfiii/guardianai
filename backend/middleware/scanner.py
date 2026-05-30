@@ -260,7 +260,7 @@ def _result(
     flagged:  bool            = False,
     reason:   str | None      = None,
     severity: str | None      = None,
-    matches:  list[Match] | None = None,   # ✅ None par défaut, jamais []
+    matches:  list[Match] | None = None,   #  None par défaut, jamais []
 ) -> ScanResult:
     """
     Construit un ScanResult.
