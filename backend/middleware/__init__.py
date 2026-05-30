@@ -1,32 +1,20 @@
-"""
-Middleware de sécurité — point d'entrée public du package.
-
-Pipeline :
-    Scanner ──► Filter ──► Detector
-
-Chaque composant est indépendant et peut être utilisé seul,
-ou enchaîné dans l'ordre recommandé ci-dessus.
-
-Usage rapide :
+ameliore """
+Point d'entrée du package middleware.
+Expose les trois composants du pipeline de sécurité ainsi que
+leurs types publics pour simplifier les imports dans le reste
+de l'application :
     from middleware import Scanner, Filter, Detector
     from middleware import ScanResult, FilterResult, DetectionResult
-
-    result = Scanner().scan(data)
-    if result.is_clean:
-        filtered = Filter().apply(result)
-        verdict  = Detector().analyse(filtered)
 """
-
 from .scanner  import Scanner,  ScanResult
 from .filter   import Filter,   FilterResult
 from .detector import Detector, DetectionResult
-
 __all__ = [
-    # Composants du pipeline
+    # Classes
     "Scanner",
     "Filter",
     "Detector",
-    # Types de retour
+    # Types
     "ScanResult",
     "FilterResult",
     "DetectionResult",
