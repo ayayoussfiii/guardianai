@@ -3,7 +3,7 @@ middleware/scanner.py
 ─────────────────────
 Analyse statique d'un prompt avant tout traitement LLM.
 
-Améliorations vs v1 :
+
   • Normalisation Unicode (homoglyphes, zero-width chars, encodages alternatifs)
   • Niveaux de sévérité : BLOCK / WARN (warn = logué mais non bloquant, configurable)
   • Rapport complet : toutes les correspondances trouvées, pas seulement la première
