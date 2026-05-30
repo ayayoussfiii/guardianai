@@ -11,6 +11,12 @@ Améliorations vs v1 :
   • Résultat enrichi : score, session_id retourné, gravité
   • Méthode summary() pour l'endpoint GET /sessions/{id}
   • Séparation claire des responsabilités en méthodes privées
+
+Corrections vs v2 :
+  • Race condition corrigée : snapshot atomique dans detect()
+  • Double acquisition de lock supprimée (une seule section critique)
+  • _analyse() regroupe les vérifications hors lock
+  • _finalise() applique la mise à jour sous lock unique
 """
 
 import logging
@@ -21,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import TypedDict
 
 logger = logging.getLogger(__name__)
+
 
 # ─── Contrats typés ──────────────────────────────────────────────────────────
 
@@ -57,12 +64,12 @@ HIGH_RISK_KEYWORDS: frozenset[str] = frozenset({
 @dataclass
 class SessionContext:
     session_id:  str
-    created_at:  float             = field(default_factory=time.time)
-    last_seen:   float             = field(default_factory=time.time)
-    messages:    list[str]         = field(default_factory=list)
-    flags:       list[dict]        = field(default_factory=list)   # {reason, score, ts}
-    flag_count:  int               = 0
-    risk_score:  float             = 0.0   # score cumulatif pondéré
+    created_at:  float         = field(default_factory=time.time)
+    last_seen:   float         = field(default_factory=time.time)
+    messages:    list[str]     = field(default_factory=list)
+    flags:       list[dict]    = field(default_factory=list)   # {reason, score, ts}
+    flag_count:  int           = 0
+    risk_score:  float         = 0.0   # score cumulatif pondéré
 
     def touch(self) -> None:
         self.last_seen = time.time()
@@ -93,10 +100,13 @@ class Detector:
     """
     Détection comportementale multi-tours avec suivi de session.
 
-    Thread-safe. Chaque appel à detect() est atomique vis-à-vis du
-    dictionnaire de sessions.
+    Thread-safe. La méthode detect() effectue deux sections critiques
+    distinctes et bien délimitées :
+      1. Initialisation/lecture de session (sous lock)
+      2. Finalisation/écriture du résultat   (sous lock)
+    Les calculs de score sont effectués entre les deux, hors lock.
 
-    Seuils configurables via le constructeur ou variables d'env.
+    Seuils configurables via le constructeur.
     """
 
     def __init__(
@@ -104,7 +114,7 @@ class Detector:
         max_flags:    int   = 3,
         session_ttl:  float = 3_600.0,   # 1 h
         max_sessions: int   = 10_000,
-        block_score:  float = 0.8,       # score cumulatif de blocage
+        block_score:  float = 0.8,
     ):
         self.max_flags    = max_flags
         self.session_ttl  = session_ttl
@@ -118,39 +128,49 @@ class Detector:
     # ── API publique ──────────────────────────────────────────────────────────
 
     def detect(self, prompt: str, session_id: str | None = None) -> DetectionResult:
-        """Point d'entrée principal. Retourne un DetectionResult complet."""
+        """
+        Point d'entrée principal. Retourne un DetectionResult complet.
+
+        Flux :
+          [lock] lecture session + snapshot état  →
+          [hors lock] calcul du score             →
+          [lock] écriture du résultat
+        """
+        # ① Lecture atomique de l'état de session
         with self._lock:
             self._maybe_cleanup()
             sid, ctx = self._get_or_create(session_id)
 
-        # ① Session déjà blacklistée
-        if ctx.flag_count >= self.max_flags or ctx.risk_score >= self.block_score:
-            return self._blocked(sid, f"Session bloquée (flags={ctx.flag_count}, score={ctx.risk_score:.2f})")
+            # Snapshot des valeurs critiques sous lock pour éviter
+            # toute race condition avec un autre thread
+            is_blocked   = (
+                ctx.flag_count >= self.max_flags
+                or ctx.risk_score >= self.block_score
+            )
+            block_reason = (
+                f"Session bloquée "
+                f"(flags={ctx.flag_count}, score={ctx.risk_score:.2f})"
+            )
+            # Copie locale de l'historique pour les calculs hors lock
+            last_message = ctx.messages[-1] if ctx.messages else None
 
-        score = 0.0
-        reason: str | None = None
+        # ② Session déjà blacklistée → retour immédiat
+        if is_blocked:
+            return self._blocked(sid, block_reason)
 
-        # ② Mots-clés à haut risque (indépendants du contexte)
-        hr_score, hr_reason = self._check_high_risk(prompt)
-        score  += hr_score
-        reason  = reason or hr_reason
+        # ③ Calculs hors lock (pas d'accès à l'état partagé)
+        score, reason = self._analyse(prompt, last_message)
+        malicious     = score >= 0.5
 
-        # ③ Escalade multi-tours (nécessite un historique)
-        if ctx.messages:
-            esc_score, esc_reason = self._check_escalation(prompt, ctx)
-            score  += esc_score
-            reason  = reason or esc_reason
+        # ④ Écriture atomique du résultat
+        with self._lock:
+            self._finalise(ctx, prompt, reason, score, malicious)
 
-        # ④ Décision
-        malicious = score >= 0.5
         if malicious:
-            with self._lock:
-                ctx.add_flag(reason or "inconnu", score)
-            logger.warning("Prompt malveillant | session=%s score=%.2f reason=%s", sid, score, reason)
-        else:
-            with self._lock:
-                ctx.messages.append(prompt)
-                ctx.touch()
+            logger.warning(
+                "Prompt malveillant | session=%s score=%.2f reason=%s",
+                sid, score, reason,
+            )
 
         return {
             "malicious":  malicious,
@@ -176,43 +196,96 @@ class Detector:
 
     # ── Logique de détection ──────────────────────────────────────────────────
 
+    def _analyse(
+        self,
+        prompt: str,
+        last_message: str | None,
+    ) -> tuple[float, str | None]:
+        """
+        Agrège tous les checks de sécurité et retourne (score, reason).
+        Appelée hors lock — ne doit PAS accéder à self._sessions.
+        """
+        score:  float     = 0.0
+        reason: str | None = None
+
+        # Check ① mots-clés à haut risque (indépendants du contexte)
+        hr_score, hr_reason = self._check_high_risk(prompt)
+        score  += hr_score
+        reason  = reason or hr_reason
+
+        # Check ② escalade multi-tours (nécessite un message précédent)
+        if last_message is not None:
+            esc_score, esc_reason = self._check_escalation(prompt, last_message)
+            score  += esc_score
+            reason  = reason or esc_reason
+
+        return score, reason
+
+    def _finalise(
+        self,
+        ctx:      SessionContext,
+        prompt:   str,
+        reason:   str | None,
+        score:    float,
+        malicious: bool,
+    ) -> None:
+        """
+        Applique la mise à jour de session après décision.
+        Doit être appelée sous lock.
+        """
+        if malicious:
+            ctx.add_flag(reason or "inconnu", score)
+        else:
+            ctx.messages.append(prompt)
+            ctx.touch()
+
     def _check_high_risk(self, prompt: str) -> tuple[float, str | None]:
         """Mots-clés universellement suspects, quel que soit le contexte."""
-        pl = prompt.lower()
+        pl   = prompt.lower()
         hits = [kw for kw in HIGH_RISK_KEYWORDS if kw in pl]
         if hits:
             return 0.7, f"Mot-clé à haut risque détecté : « {hits[0]} »"
         return 0.0, None
 
-    def _check_escalation(self, prompt: str, ctx: SessionContext) -> tuple[float, str | None]:
+    def _check_escalation(
+        self,
+        prompt:       str,
+        last_message: str,
+    ) -> tuple[float, str | None]:
         """
         Détecte les attaques progressives :
           tour N   → mise en scène (roleplay setup)
           tour N+1 → mot d'escalade pour pousser vers l'action
-        Le score monte en fonction du nombre de messages précédents suspects.
+
+        Le score monte en fonction de la longueur du prompt suspect.
         """
         pl   = prompt.lower()
-        prev = ctx.messages[-1].lower()
+        prev = last_message.lower()
 
-        prev_has_roleplay  = any(k in prev for k in ROLEPLAY_TRIGGERS)
+        prev_has_roleplay   = any(k in prev for k in ROLEPLAY_TRIGGERS)
         curr_has_escalation = any(k in pl   for k in ESCALATION_TRIGGERS)
 
         if not (prev_has_roleplay and curr_has_escalation):
             return 0.0, None
 
         # Prompt court → moins suspect (peut être anodin)
-        length_factor = min(len(prompt) / 200, 1.0)   # seuil à 200 chars
-        score = 0.4 + 0.3 * length_factor
+        length_factor = min(len(prompt) / 200, 1.0)
+        score         = 0.4 + 0.3 * length_factor
 
         return score, "Escalade multi-tours détectée (roleplay → action)"
 
     # ── Gestion des sessions ──────────────────────────────────────────────────
 
-    def _get_or_create(self, session_id: str | None) -> tuple[str, SessionContext]:
-        """Retourne (sid, ctx). Crée la session si nécessaire. NON thread-safe seul."""
+    def _get_or_create(
+        self, session_id: str | None
+    ) -> tuple[str, SessionContext]:
+        """
+        Retourne (sid, ctx). Crée la session si nécessaire.
+        ⚠ NON thread-safe seul — doit être appelé sous self._lock.
+        """
         sid = session_id or str(uuid.uuid4())
 
-        # Lazy TTL : si la session existe mais est expirée, on la recrée
+        # Lazy TTL : session expirée → réinitialisation
         if sid in self._sessions and self._sessions[sid].is_expired(self.session_ttl):
             logger.debug("Session expirée, réinitialisation : %s", sid)
             del self._sessions[sid]
@@ -226,7 +299,10 @@ class Detector:
         return sid, self._sessions[sid]
 
     def _maybe_cleanup(self, interval: float = 300.0) -> None:
-        """Nettoyage périodique toutes les `interval` secondes. NON thread-safe seul."""
+        """
+        Nettoyage périodique toutes les `interval` secondes.
+        ⚠ NON thread-safe seul — doit être appelé sous self._lock.
+        """
         now = time.time()
         if now - self._last_cleanup < interval:
             return
@@ -246,10 +322,18 @@ class Detector:
                 del self._sessions[sid]
 
         self._last_cleanup = now
-        logger.debug("Nettoyage sessions : %d expirées, %d restantes", len(expired), len(self._sessions))
+        logger.debug(
+            "Nettoyage sessions : %d expirées, %d restantes",
+            len(expired), len(self._sessions),
+        )
 
     # ── Helpers internes ──────────────────────────────────────────────────────
 
     @staticmethod
     def _blocked(session_id: str, reason: str) -> DetectionResult:
-        return {"malicious": True, "reason": reason, "score": 1.0, "session_id": session_id}
+        return {
+            "malicious":  True,
+            "reason":     reason,
+            "score":      1.0,
+            "session_id": session_id,
+        }
